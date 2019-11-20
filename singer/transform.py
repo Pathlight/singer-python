@@ -259,7 +259,7 @@ class Transformer:
                                           schema.get(SchemaKey.pattern_properties))
 
         elif typ == "array":
-            return self._transform_array(data, schema["items"], path)
+            return self._transform_array(data, schema.get("items", {}), path)
 
         elif typ == "string":
             if data is not None:
