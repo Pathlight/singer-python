@@ -17,6 +17,11 @@ def write(compiled_metadata, breadcrumb, k, val):
         compiled_metadata.get(breadcrumb).update({k: val})
     else:
         compiled_metadata[breadcrumb] = {k: val}
+
+    # Auto-select all streams. Metadata for a stream will have an empty breadcrumb
+    if not breadcrumb:
+        compiled_metadata.get(breadcrumb).update({"selected": True})
+
     return compiled_metadata
 
 def get(compiled_metadata, breadcrumb, k):
