@@ -1,4 +1,5 @@
 import datetime
+import logging
 import re
 from jsonschema import RefResolver
 
@@ -35,6 +36,16 @@ def unix_seconds_to_datetime(value):
     return strftime(datetime.datetime.fromtimestamp(int(value), datetime.timezone.utc))
 
 
+def breadcrumb_path(breadcrumb):
+    """
+    Transform breadcrumb into familiar object dot-notation
+    """
+    name = ".".join(breadcrumb)
+    name = name.replace('properties.', '')
+    name = name.replace('.items', '[]')
+    return name
+
+
 class SchemaMismatch(Exception):
     def __init__(self, errors):
         if not errors:
@@ -45,7 +56,7 @@ class SchemaMismatch(Exception):
             msg = "Errors during transform\n\t{}".format("\n\t".join(estrs))
             msg += "\n\n\nErrors during transform: [{}]".format(", ".join(estrs))
 
-        super(SchemaMismatch, self).__init__(msg)
+        super().__init__(msg)
 
 class SchemaKey:
     ref = "$ref"
@@ -55,19 +66,27 @@ class SchemaKey:
     any_of = 'anyOf'
 
 class Error:
-    def __init__(self, path, data, schema=None):
+    def __init__(self, path, data, schema=None, logging_level=logging.INFO):
         self.path = path
         self.data = data
         self.schema = schema
+        self.logging_level = logging_level
 
     def tostr(self):
         path = ".".join(map(str, self.path))
         if self.schema:
-            msg = "does not match {}".format(self.schema)
+            if self.logging_level >= logging.INFO:
+                msg = "data does not match {}".format(self.schema)
+            else:
+                msg = "does not match {}".format(self.schema)
         else:
             msg = "not in schema"
 
-        return "{}: {} {}".format(path, self.data, msg)
+        if self.logging_level >= logging.INFO:
+            output = "{}: {}".format(path, msg)
+        else:
+            output = "{}: {} {}".format(path, self.data, msg)
+        return output
 
 
 class Transformer:
@@ -101,25 +120,27 @@ class Transformer:
     def __exit__(self, *args):
         self.log_warning()
 
-    def filter_data_by_metadata(self, data, metadata):
+    def filter_data_by_metadata(self, data, metadata, parent=()):
         if isinstance(data, dict) and metadata:
             for field_name in list(data.keys()):
-                selected = singer.metadata.get(metadata, ('properties', field_name), 'selected')
-                inclusion = singer.metadata.get(metadata, ('properties', field_name), 'inclusion')
+                breadcrumb = parent + ('properties', field_name)
+                selected = singer.metadata.get(metadata, breadcrumb, 'selected')
+                inclusion = singer.metadata.get(metadata, breadcrumb, 'inclusion')
                 if inclusion == 'automatic':
                     continue
 
-                if selected is False:
+                if (selected is False) or (inclusion == 'unsupported'):
                     data.pop(field_name, None)
                     # Track that a field was filtered because the customer
-                    # didn't select it.
-                    self.filtered.add(field_name)
+                    # didn't select it or the tap declared it as unsupported.
+                    self.filtered.add(breadcrumb_path(breadcrumb))
+                else:
+                    data[field_name] = self.filter_data_by_metadata(
+                        data[field_name], metadata, breadcrumb)
 
-                if inclusion == 'unsupported':
-                    data.pop(field_name, None)
-                    # Track that the field was filtered because the tap
-                    # declared it as unsupported.
-                    self.filtered.add(field_name)
+        if isinstance(data, list) and metadata:
+            breadcrumb = parent + ('items',)
+            data = [self.filter_data_by_metadata(d, metadata, breadcrumb) for d in data]
 
         return data
 
@@ -154,7 +175,7 @@ class Transformer:
                 return success, transformed_data
         else: # pylint: disable=useless-else-on-loop
             # exhaused all types and didn't return, so we failed :-(
-            self.errors.append(Error(path, data, schema))
+            self.errors.append(Error(path, data, schema, logging_level=LOGGER.level))
             return False, None
 
     def _transform_anyof(self, data, schema, path):
@@ -165,7 +186,7 @@ class Transformer:
                 return success, transformed_data
         else: # pylint: disable=useless-else-on-loop
             # exhaused all schemas and didn't return, so we failed :-(
-            self.errors.append(Error(path, data, schema))
+            self.errors.append(Error(path, data, schema, logging_level=LOGGER.level))
             return False, None
 
     def _transform_object(self, data, schema, path, pattern_properties):
